@@ -45,6 +45,7 @@ def mark_done(
     content: str = "",
     images: list[str] | None = None,
     error: str | None = None,
+    tool_events: list[dict[str, Any]] | None = None,
 ) -> None:
     if not task_id:
         return
@@ -54,15 +55,18 @@ def mark_done(
             "user_id": "",
             "started_at": _now(),
         }
-        prev.update(
-            {
-                "status": "error" if error else "done",
-                "content": content or "",
-                "images": list(images or []),
-                "error": error,
-                "finished_at": _now(),
-            }
-        )
+        update: dict[str, Any] = {
+            "status": "error" if error else "done",
+            "content": content or "",
+            "images": list(images or []),
+            "error": error,
+            "finished_at": _now(),
+        }
+        if tool_events is not None:
+            update["tool_events"] = list(tool_events)
+        elif "tool_events" not in prev:
+            update["tool_events"] = []
+        prev.update(update)
         _runs[task_id] = prev
 
 

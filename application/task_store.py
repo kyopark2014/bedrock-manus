@@ -599,3 +599,42 @@ def add_message(
             "SELECT * FROM messages WHERE id = ?", (message_id,)
         ).fetchone()
     return _row_to_message(row) if row else {}
+
+
+def update_message_tool_events(
+    message_id: str,
+    task_id: str,
+    user_id: str,
+    tool_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Backfill tool_events on an existing assistant message (refresh recovery)."""
+    if not message_id or not tool_events:
+        return None
+    with _connect_user(user_id) as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE id = ? AND task_id = ?",
+            (message_id, task_id),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            """
+            UPDATE messages
+            SET tool_events_json = ?
+            WHERE id = ? AND task_id = ?
+            """,
+            (
+                json.dumps(tool_events, ensure_ascii=False),
+                message_id,
+                task_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE id = ?",
+            (_now_iso(), task_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+    _after_write(user_id)
+    return _row_to_message(updated) if updated else None

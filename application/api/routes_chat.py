@@ -429,6 +429,29 @@ def _spawn_late_persist(
             # Another path (SSE finally / hydrate) may have already written.
             existing = task_store.list_messages(task_id, user_id)
             if existing and existing[-1].get("role") == "assistant":
+                # Text-only hydrate may have won the race — backfill tools.
+                last = existing[-1]
+                if events and not (last.get("tool_events") or []):
+                    updated = task_store.update_message_tool_events(
+                        last["id"],
+                        task_id,
+                        user_id,
+                        events,
+                    )
+                    if updated:
+                        run_registry.mark_done(
+                            task_id,
+                            content=final_content or (last.get("content") or ""),
+                            images=images or (last.get("images") or []),
+                            tool_events=events,
+                        )
+                        flush_persist(user_id)
+                        _kick_graph_job(user_id)
+                        logger.info(
+                            "Late persist backfilled tool_events (%s)",
+                            len(events),
+                        )
+                        return
                 logger.info("Late persist skipped: assistant already persisted")
                 return
 
@@ -442,6 +465,12 @@ def _spawn_late_persist(
                 "assistant",
                 final_content,
                 user_id=user_id,
+                images=images,
+                tool_events=events,
+            )
+            run_registry.mark_done(
+                task_id,
+                content=final_content,
                 images=images,
                 tool_events=events,
             )
