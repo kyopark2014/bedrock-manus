@@ -598,7 +598,21 @@ export default function App() {
                 ),
               ]);
             }
-            if (!final?.stopped) {
+            if (final?.stopped && shouldAppendAssistantMessage(final)) {
+              try {
+                // Belt-and-suspenders: ensure worker cancel even if stop raced.
+                await appDataService.cancelTaskRun(taskId).catch(() => undefined);
+                await appDataService.addMessage(taskId, {
+                  role: "assistant",
+                  content: final!.content,
+                  images: final!.images,
+                  tool_events: final!.tool_events,
+                });
+                await loadMessages(taskId);
+              } catch (err) {
+                uiError("chat:persist stop message failed", err);
+              }
+            } else if (!final?.stopped) {
               await loadMessages(taskId);
             }
           }

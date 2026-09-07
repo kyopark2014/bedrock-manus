@@ -1,10 +1,13 @@
 import logging
 import sys
 import traceback
+import asyncio
 try:
     from application import chat
+    from application import run_cancel
 except ImportError:  # script-style runs with application/ on sys.path
     import chat
+    import run_cancel
 import utils
 import agentcore_sigv4_auth
 import sys
@@ -734,6 +737,15 @@ def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
 async def call_model(state: State, config):
     logger.info(f"###### call_model ######")
 
+    cancel_id = _cancel_id_from_config(config)
+    if run_cancel.is_cancelled(cancel_id):
+        logger.info(f"call_model skipped: cancelled ({cancel_id})")
+        artifacts = state["artifacts"] if "artifacts" in state else []
+        return {
+            "messages": [AIMessage(content="")],
+            "artifacts": artifacts,
+        }
+
     last_message = state['messages'][-1]
     logger.info(f"last message: {last_message}")
     
@@ -816,18 +828,26 @@ async def call_model(state: State, config):
         # Stream tokens/chunks to the graph via astream (use with stream_mode="messages")
         accumulated: AIMessageChunk | None = None
         async for chunk in model.astream(model_messages):
+            if run_cancel.is_cancelled(cancel_id):
+                logger.info(f"call_model stream aborted: cancelled ({cancel_id})")
+                break
             if accumulated is None:
                 accumulated = chunk
             else:
                 accumulated = accumulated + chunk
 
-        if accumulated is None:
+        if run_cancel.is_cancelled(cancel_id) and accumulated is None:
+            response = AIMessage(content="")
+        elif accumulated is None:
             response = AIMessage(content="답변을 찾지 못하였습니다.")
         else:
             merged = message_chunk_to_message(accumulated)
             response = merged if isinstance(merged, AIMessage) else AIMessage(
                 content=getattr(merged, "content", str(merged))
             )
+            if run_cancel.is_cancelled(cancel_id):
+                # Drop pending tool_calls so the graph can end cleanly.
+                response = AIMessage(content=_assistant_text_content(response) or "")
         if active_model_type in ("claude", "nova") or chat.uses_adaptive_thinking(
             active_model_id
         ):
@@ -845,6 +865,18 @@ async def call_model(state: State, config):
 
 async def should_continue(state: State, config) -> Literal["continue", "end"]:
     logger.info(f"###### should_continue ######")
+
+    cancel_id = _cancel_id_from_config(config)
+    if run_cancel.is_cancelled(cancel_id):
+        # Route to action so pending tool_calls get cancelled ToolMessages
+        # (keeps checkpoint valid for the next user turn on the same thread).
+        messages = state["messages"]
+        last_message = messages[-1] if messages else None
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            logger.info("--- CANCEL → action (heal tool_calls) ---")
+            return "continue"
+        logger.info("--- CANCEL → end ---")
+        return "end"
 
     messages = state["messages"]    
     last_message = messages[-1]
@@ -865,13 +897,82 @@ async def should_continue(state: State, config) -> Literal["continue", "end"]:
         logger.info(f"--- END ---")
         return "end"
 
+
+def _cancel_id_from_config(config) -> str | None:
+    cfg = (config or {}).get("configurable") or {}
+    return cfg.get("thread_id")
+
+
+def _cancelled_tool_messages(state: State) -> list[ToolMessage]:
+    messages = state.get("messages") or []
+    if not messages:
+        return []
+    last = messages[-1]
+    if not (isinstance(last, AIMessage) and last.tool_calls):
+        return []
+    out: list[ToolMessage] = []
+    for tc in last.tool_calls:
+        tid = tc.get("id") if isinstance(tc, dict) else None
+        if tid:
+            out.append(
+                ToolMessage(
+                    content="Cancelled by user",
+                    tool_call_id=tid,
+                )
+            )
+    return out
+
+
+async def _action_node(state: State, config, tool_node: ToolNode):
+    cancel_id = _cancel_id_from_config(config)
+    if run_cancel.is_cancelled(cancel_id):
+        cancelled_msgs = _cancelled_tool_messages(state)
+        if cancelled_msgs:
+            logger.info(
+                "action skipped: cancelled — emitting %s ToolMessage(s)",
+                len(cancelled_msgs),
+            )
+            return {"messages": cancelled_msgs}
+        logger.info("action skipped: cancelled (no pending tool_calls)")
+        return {}
+
+    # Poll cancel while tools run so Stop doesn't wait for execute_code/etc.
+    invoke_task = asyncio.create_task(tool_node.ainvoke(state, config))
+    try:
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(invoke_task), timeout=0.25
+                )
+            except asyncio.TimeoutError:
+                if run_cancel.is_cancelled(cancel_id):
+                    logger.info(
+                        "action aborted mid-tool: cancelled (%s)", cancel_id
+                    )
+                    invoke_task.cancel()
+                    try:
+                        await invoke_task
+                    except asyncio.CancelledError:
+                        pass
+                    cancelled_msgs = _cancelled_tool_messages(state)
+                    if cancelled_msgs:
+                        return {"messages": cancelled_msgs}
+                    return {}
+    except asyncio.CancelledError:
+        invoke_task.cancel()
+        raise
+
+
 def buildChatAgent(tools):
     tool_node = ToolNode(tools, handle_tool_errors=True)
+
+    async def action(state: State, config):
+        return await _action_node(state, config, tool_node)
 
     workflow = StateGraph(State)
 
     workflow.add_node("agent", call_model)
-    workflow.add_node("action", tool_node)
+    workflow.add_node("action", action)
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges(
         "agent",
@@ -888,10 +989,13 @@ def buildChatAgent(tools):
 def buildChatAgentWithHistory(tools):
     tool_node = ToolNode(tools, handle_tool_errors=True)
 
+    async def action(state: State, config):
+        return await _action_node(state, config, tool_node)
+
     workflow = StateGraph(State)
 
     workflow.add_node("agent", call_model)
-    workflow.add_node("action", tool_node)
+    workflow.add_node("action", action)
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges(
         "agent",

@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import type { ToolEvent } from "../types";
 import { uiError, uiLog, uiWarn } from "../debug";
 import { chatService } from "../services/chatService";
+import { appDataService } from "../services/appDataService";
 
 const TOOL_INPUT_INFO_RE = /^Tool: .+?, Input:/s;
 const TOOL_RESULT_INFO_RE = /^Tool Result: /s;
@@ -112,6 +113,10 @@ export function useChatStream() {
       return;
     }
     uiLog("chat:stop", { taskId });
+    // Fire cancel immediately (keepalive) so the worker stops even if abort races.
+    void appDataService.cancelTaskRun(taskId).catch((err) => {
+      uiWarn("chat:cancel failed", err);
+    });
     controller.abort();
   }, []);
 

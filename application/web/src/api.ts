@@ -164,6 +164,24 @@ export const api = {
   getMessages: (id: string) =>
     request<{ messages: Message[] }>(`/api/tasks/${id}/messages`),
   getTaskRun: (id: string) => request<TaskRun>(`/api/tasks/${id}/run`),
+  cancelTaskRun: (id: string) =>
+    request<{ ok: boolean; task_id: string; cancelled: boolean }>(
+      `/api/tasks/${id}/cancel`,
+      { method: "POST" },
+    ),
+  addMessage: (
+    id: string,
+    body: {
+      role?: "assistant" | "user";
+      content: string;
+      images?: string[];
+      tool_events?: Message["tool_events"];
+    },
+  ) =>
+    request<Message>(`/api/tasks/${id}/messages`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   uploadToRag: async (
     file: File,
     options?: { sync?: boolean },

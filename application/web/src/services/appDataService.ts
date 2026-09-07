@@ -102,6 +102,30 @@ export const appDataService = {
     }
   },
 
+  async cancelTaskRun(taskId: string): Promise<void> {
+    try {
+      await api.cancelTaskRun(taskId);
+    } catch (error) {
+      throw sanitizeError(error, "Failed to cancel task run.");
+    }
+  },
+
+  async addMessage(
+    taskId: string,
+    body: {
+      role?: "assistant" | "user";
+      content: string;
+      images?: string[];
+      tool_events?: Message["tool_events"];
+    },
+  ): Promise<Message> {
+    try {
+      return await api.addMessage(taskId, body);
+    } catch (error) {
+      throw sanitizeError(error, "Failed to save message.");
+    }
+  },
+
   async createTask(defaults: CreateTaskDefaults): Promise<Task> {
     try {
       return await api.createTask(defaults);

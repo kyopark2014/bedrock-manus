@@ -14,6 +14,7 @@ from application import task_store
 from application.task_store_persistence import flush_persist
 from application import chat
 from application import run_registry
+from application import run_cancel
 from application.notification_queue import QueueNotificationSink
 from application.runtime_mode import run_agent
 
@@ -405,6 +406,10 @@ def _spawn_late_persist(
                     streamed_text=text,
                 )
 
+            if result_holder.get("cancelled") or run_cancel.is_cancelled(task_id):
+                logger.info("Late persist skipped: user cancelled")
+                return
+
             if "error" in result_holder:
                 logger.info(
                     "Late persist skipped: agent worker error=%s",
@@ -541,6 +546,8 @@ def _run_agent_thread(
             response = json.dumps(response, ensure_ascii=False)
         result_holder["content"] = response
         result_holder["images"] = image_url or []
+        if run_cancel.is_cancelled(task_id) or run_cancel.is_cancelled(runtime_session_id):
+            result_holder["cancelled"] = True
         run_registry.mark_done(
             task_id,
             content=response,
@@ -549,6 +556,8 @@ def _run_agent_thread(
     except Exception as exc:
         logger.exception("Agent run failed")
         result_holder["error"] = str(exc)
+        if run_cancel.is_cancelled(task_id) or run_cancel.is_cancelled(runtime_session_id):
+            result_holder["cancelled"] = True
         run_registry.mark_done(task_id, error=str(exc))
     finally:
         message_queue.put(None)
@@ -577,6 +586,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
 
     task_store.add_message(task_id, "user", prompt, user_id=user_id, images=files)
 
+    runtime_session_id = task.get("runtime_session_id") or task_id
     message_queue: queue.Queue = queue.Queue()
     result_holder: dict[str, Any] = {"content": "", "images": []}
 
@@ -592,7 +602,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             "guardrail_enabled": task["guardrail_enabled"],
             "llm_gateway_enabled": task.get("llm_gateway_enabled", False),
             "memory_enabled": task["memory_enabled"],
-            "runtime_session_id": task.get("runtime_session_id") or task_id,
+            "runtime_session_id": runtime_session_id,
             "files": files,
             "message_queue": message_queue,
             "result_holder": result_holder,
@@ -715,6 +725,22 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 streamed_text=streamed_text,
             )
 
+            if result_holder.get("cancelled") or run_cancel.is_cancelled(task_id):
+                logger.info(
+                    "Agent finished after cancel; skip server persist "
+                    "(client stop message)"
+                )
+                yield _sse_event(
+                    {
+                        "type": "done",
+                        "content": final_content,
+                        "images": images,
+                        "tool_events": events,
+                        "cancelled": True,
+                    }
+                )
+                return
+
             task_store.add_message(
                 task_id,
                 "assistant",
@@ -734,9 +760,19 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 }
             )
         except GeneratorExit:
-            # Always persist if DB still ends on user — including the race where
-            # the worker finished (already_final) but add_message never ran.
-            if not sse_closed_early and _messages_need_assistant(task_id, user_id):
+            # Stop calls POST /cancel before abort; refresh only aborts SSE.
+            user_cancelled = bool(
+                result_holder.get("cancelled")
+                or run_cancel.is_cancelled(task_id)
+                or run_cancel.is_cancelled(runtime_session_id)
+            )
+            if user_cancelled:
+                result_holder["cancelled"] = True
+                logger.info(
+                    "SSE disconnected after cancel; skip server persist "
+                    "(client stop message)"
+                )
+            elif not sse_closed_early and _messages_need_assistant(task_id, user_id):
                 already_final = bool(
                     (result_holder.get("content") or "").strip()
                 ) or ("error" in result_holder)

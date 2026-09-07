@@ -4,7 +4,12 @@ from pydantic import BaseModel, Field
 from application.api.routes_auth import require_user_id, _llm_gateway_ready
 from application import task_store
 from application import utils
+from application import run_cancel
 from application.run_state import query_task_run
+from application.task_store_persistence import flush_persist
+import logging
+
+logger = logging.getLogger("routes_tasks")
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -32,6 +37,14 @@ class TaskPatch(BaseModel):
     llm_gateway_enabled: bool | None = None
     memory_enabled: bool | None = None
     pinned: bool | None = None
+
+
+
+class MessageCreate(BaseModel):
+    role: str = "assistant"
+    content: str = ""
+    images: list[str] = Field(default_factory=list)
+    tool_events: list[dict] = Field(default_factory=list)
 
 
 def _require_gateway_if_enabling(enabled: bool | None) -> None:
@@ -144,3 +157,52 @@ def get_task_run(task_id: str, request: Request):
     if result.get("status") == "missing":
         raise HTTPException(status_code=404, detail="Task not found")
     return result
+
+
+@router.post("/{task_id}/messages")
+def create_message(task_id: str, body: MessageCreate, request: Request):
+    """Persist a message (e.g. client-side stop notice) into the task transcript."""
+    user_id = require_user_id(request)
+    task = task_store.get_task_refreshing(task_id, user_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    role = (body.role or "assistant").strip().lower()
+    if role not in ("assistant", "user"):
+        raise HTTPException(status_code=400, detail="role must be assistant or user")
+    content = (body.content or "").strip()
+    if not content and not body.tool_events:
+        raise HTTPException(status_code=400, detail="content or tool_events required")
+    message = task_store.add_message(
+        task_id,
+        role,
+        content,
+        user_id=user_id,
+        images=body.images,
+        tool_events=body.tool_events,
+    )
+    flush_persist(user_id)
+    return message
+
+
+@router.post("/{task_id}/cancel")
+def cancel_task_run(task_id: str, request: Request):
+    """Signal the in-process agent worker to stop tool/model loops for this task.
+
+    History (LangGraph checkpoint thread_id == task_id) is preserved so the next
+    user message continues the same conversation.
+    """
+    user_id = require_user_id(request)
+    task = task_store.get_task_refreshing(task_id, user_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    session_id = task.get("runtime_session_id") or task_id
+    run_cancel.request_cancel(task_id)
+    if session_id != task_id:
+        run_cancel.request_cancel(session_id)
+    logger.info(
+        "Cancel requested: task_id=%s session_id=%s user=%s",
+        task_id,
+        session_id,
+        user_id,
+    )
+    return {"ok": True, "task_id": task_id, "cancelled": True}

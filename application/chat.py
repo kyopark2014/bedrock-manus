@@ -17,6 +17,11 @@ import mcp_config
 import skill
 
 try:
+    from application import run_cancel
+except ImportError:
+    import run_cancel
+
+try:
     from application.llm_gateway_models import LLM_GATEWAY_MODEL_MAP
 except ImportError:
     from llm_gateway_models import LLM_GATEWAY_MODEL_MAP
@@ -2412,6 +2417,8 @@ async def _run_langgraph_agent_impl(
     session_id = runtime_session_id or _runtime_session_id()
     if session_id:
         set_checkpoint_session_id(session_id)
+        # Fresh turn: clear any stale stop signal from a prior request.
+        run_cancel.clear(session_id)
 
     # Refresh checkpointer on the dedicated agent loop (same loop across requests).
     await ensure_checkpointer(session_id)
@@ -2445,6 +2452,7 @@ async def _run_langgraph_agent_impl(
     tool_name = toolUseId = ""
     tool_input_list.clear()
     stop_reason: str | None = None
+    cancelled = False
 
     def remember_stop_reason(message) -> None:
         nonlocal stop_reason
@@ -2457,6 +2465,11 @@ async def _run_langgraph_agent_impl(
             logger.info(f"[stop_reason] {stop_reason}")
 
     async for stream in app.astream(inputs, agent_config, stream_mode="messages"):
+        if session_id and run_cancel.is_cancelled(session_id):
+            cancelled = True
+            logger.info(f"Cancel detected for session {session_id}; stopping astream")
+            break
+
         chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
         if isinstance(chunk, AIMessageChunk):
@@ -2584,10 +2597,23 @@ async def _run_langgraph_agent_impl(
             if content:
                 logger.info(f"content: {content}")
 
+    if not cancelled and session_id and run_cancel.is_cancelled(session_id):
+        cancelled = True
+
+    if cancelled:
+        try:
+            await _heal_cancelled_checkpoint(app, agent_config)
+        except Exception as e:
+            logger.warning(f"cancel checkpoint heal skipped: {e}")
+
     # Final stop_reason wins even when earlier turns left preamble text
     # (e.g. "확인해보겠습니다" + tools, then empty refusal).
     skip_memory = False
-    if stop_reason == "content_filtered":
+    if cancelled:
+        # Keep partial text if any; empty is fine — UI persists the stop notice.
+        skip_memory = True
+        logger.info(f"Run cancelled for session {session_id}; partial result len={len(result)}")
+    elif stop_reason == "content_filtered":
         result = (
             "요청이 모델 안전 정책에 의해 차단되었습니다. "
             "다른 모델로 시도하거나 질문을 바꿔 주세요."
@@ -2625,6 +2651,34 @@ async def _run_langgraph_agent_impl(
         logger.warning(f"checkpoint persist skipped: {e}")
 
     return result, artifacts
+
+
+
+async def _heal_cancelled_checkpoint(app, agent_config) -> None:
+    """Ensure pending AIMessage.tool_calls have ToolMessages so the next turn can continue."""
+    if app is None or agent_config is None:
+        return
+    state = await app.aget_state(agent_config)
+    values = getattr(state, "values", None) or {}
+    messages = values.get("messages") or []
+    if not messages:
+        return
+    last = messages[-1]
+    if not (isinstance(last, AIMessage) and getattr(last, "tool_calls", None)):
+        return
+    tool_msgs = []
+    for tc in last.tool_calls:
+        tid = tc.get("id") if isinstance(tc, dict) else None
+        if tid:
+            tool_msgs.append(
+                ToolMessage(content="Cancelled by user", tool_call_id=tid)
+            )
+    if not tool_msgs:
+        return
+    logger.info(
+        "Healing cancelled checkpoint with %s ToolMessage(s)", len(tool_msgs)
+    )
+    await app.aupdate_state(agent_config, {"messages": tool_msgs}, as_node="action")
 
 
 #########################################################
