@@ -762,7 +762,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 yield _sse_event(
                     {
                         "type": "done",
-                        "content": final_content,
+                        "content": "",
                         "images": images,
                         "tool_events": events,
                         "cancelled": True,
