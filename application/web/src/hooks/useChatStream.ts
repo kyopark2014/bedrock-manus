@@ -267,23 +267,18 @@ export function useChatStream() {
       } catch (err) {
         if (isAbortError(err) || controller.signal.aborted) {
           flushTextSegment();
-          const partial = localEvents
-            .filter((e) => e.type === "text" && e.data)
-            .map((e) => e.data!)
-            .join("\n\n")
-            .trim();
-          const livePartial = (streamTextRefs.current[taskId] ?? "").trim();
-          const body = [partial, livePartial].filter(Boolean).join("\n\n").trim();
           const elapsedSeconds = Math.max(
             1,
             Math.round((Date.now() - startedAt) / 1000),
           );
           const notice = `You stopped after ${elapsedSeconds}s`;
           uiLog("chat:send aborted", { taskId, elapsedSeconds });
+          // Keep text segments in tool_events so AI ↔ Tool order stays interleaved.
+          // Only the stop notice goes in content (rendered after the timeline).
           finalMessage = {
-            content: body ? `${body}\n\n${notice}` : notice,
+            content: notice,
             images: [],
-            tool_events: localEvents.filter((e) => e.type !== "text"),
+            tool_events: localEvents,
             stopped: true,
             elapsedSeconds,
           };
