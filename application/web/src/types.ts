@@ -17,10 +17,6 @@ export interface Task {
 export interface ToolEvent {
   type: "text" | "tool" | "tool_result" | "info" | "plan" | "status";
   tool?: string;
-  /** MCP server name when the tool belongs to a selected MCP server. */
-  mcpServer?: string;
-  /** Skill name when the tool is get_skill_instructions. */
-  skillName?: string;
   input?: unknown;
   toolUseId?: string;
   data?: string;
@@ -109,8 +105,6 @@ export interface StreamEvent {
   mcpServer?: string;
   input?: unknown;
   toolUseId?: string;
-  /** Set on done when the user stopped the run (cancel). */
-  cancelled?: boolean;
 }
 
 export type TaskRunStatus =

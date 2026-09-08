@@ -22,10 +22,6 @@ function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
-function isStopNotice(content: string): boolean {
-  return /^You stopped after \d+s$/i.test(content.trim());
-}
-
 function isStreamingPrefixOfFinal(partial: string, finalText: string): boolean {
   if (!partial || !finalText) return false;
   if (finalText.startsWith(partial) || partial.startsWith(finalText)) return true;
@@ -35,8 +31,6 @@ function isStreamingPrefixOfFinal(partial: string, finalText: string): boolean {
 
 function filterSupersededTextEvents(events: ToolEvent[], content: string): ToolEvent[] {
   const normalizedContent = normalizeText(content);
-  // Stop notice is trailing UI chrome — never use it to hide timeline AI text.
-  const hideAgainstContent = Boolean(normalizedContent) && !isStopNotice(content);
   const textIndexes = events
     .map((event, index) => (event.type === "text" ? index : -1))
     .filter((index) => index >= 0);
@@ -54,8 +48,8 @@ function filterSupersededTextEvents(events: ToolEvent[], content: string): ToolE
       }
     }
     if (
-      hideAgainstContent &&
       !hidden.has(index) &&
+      normalizedContent &&
       isStreamingPrefixOfFinal(text, normalizedContent) &&
       text.length < normalizedContent.length
     ) {

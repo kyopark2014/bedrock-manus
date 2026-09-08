@@ -2190,16 +2190,6 @@ def _notify_tool(notification_queue, tool_use_id: str, message: str) -> None:
         notification_queue.tool_update(tool_use_id, message)
 
 
-def _commit_stream_text_before_tool(notification_queue, result: str, tool_used: bool) -> None:
-    """Emit a text_segment so the UI timeline stays AI → Tool ordered."""
-    if tool_used or notification_queue is None:
-        return
-    stripped = (result or "").strip()
-    if not stripped:
-        return
-    notification_queue.commit_text_segment(stripped)
-
-
 def _notify_result(notification_queue, message: str) -> None:
     if notification_queue is not None:
         notification_queue.result(message)
@@ -2520,9 +2510,6 @@ async def _run_langgraph_agent_impl(
                             tool_input_list[toolUseId] += partial_json
                             if partial_json:
                                 handled_tool_input = True
-                            _commit_stream_text_before_tool(
-                                notification_queue, result, tool_used
-                            )
                             _notify_tool(
                                 notification_queue,
                                 toolUseId,
@@ -2543,9 +2530,6 @@ async def _run_langgraph_agent_impl(
                             tool_input_list[toolUseId] = arguments
                             if arguments:
                                 handled_tool_input = True
-                            _commit_stream_text_before_tool(
-                                notification_queue, result, tool_used
-                            )
                             _notify_tool(
                                 notification_queue,
                                 toolUseId,
@@ -2568,9 +2552,6 @@ async def _run_langgraph_agent_impl(
                         args_delta = str(args_delta) if args_delta else ""
                     prev = tool_input_list.get(toolUseId, "")
                     tool_input_list[toolUseId] = prev + args_delta
-                    _commit_stream_text_before_tool(
-                        notification_queue, result, tool_used
-                    )
                     _notify_tool(
                         notification_queue,
                         toolUseId,
@@ -2589,9 +2570,6 @@ async def _run_langgraph_agent_impl(
                     tool_input_list[tid] = str(targs)
                 if notification_queue is not None:
                     notification_queue.register_tool(tid, tname)
-                _commit_stream_text_before_tool(
-                    notification_queue, result, tool_used
-                )
                 _notify_tool(
                     notification_queue,
                     tid,
